@@ -13,7 +13,7 @@
 //==============================================================================
 /**
 */
-class FIRFilterAudioProcessor  : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener, private juce::AsyncUpdater
+class FIRFilterAudioProcessor  : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
 {
 public:
     //==============================================================================
@@ -56,7 +56,6 @@ public:
     const std::vector<float>& getFIRCoefficients() const { return firCoeffs; }
     
     void parameterChanged(const juce::String& parameterID, float newValue) override;
-    void handleAsyncUpdate() override;
 
     juce::AudioProcessorValueTreeState apvts;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -67,13 +66,13 @@ public:
 private:
     const int tapSize = 65;
     std::vector<float> firCoeffs;
-    std::shared_ptr<std::vector<float>> firCoeffsPtr;
-    std::shared_ptr<std::vector<float>> firCoeffsAtomic;
     std::vector<std::vector<float>> delayBuffers;  // delay sample buffer
 
     void updateFilter();
 
     juce::AudioParameterFloat* cutoffParam;
+    juce::AudioParameterChoice* filterTypeParam;
+    
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FIRFilterAudioProcessor)

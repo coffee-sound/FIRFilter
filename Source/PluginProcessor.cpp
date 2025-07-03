@@ -18,7 +18,12 @@ FIRFilterAudioProcessor::FIRFilterAudioProcessor()
 {
     auto* param = apvts.getParameter("cutoff");
     cutoffParam = dynamic_cast<juce::AudioParameterFloat*>(param);
+
+    param = apvts.getParameter("type");
+    filterTypeParam = dynamic_cast<juce::AudioParameterChoice*>(param);
+
     apvts.addParameterListener("cutoff", this);
+    apvts.addParameterListener("type", this);
 }
 
 FIRFilterAudioProcessor::~FIRFilterAudioProcessor()
@@ -101,9 +106,6 @@ void FIRFilterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     for (auto& buf : delayBuffers) {
         buf.resize(firCoeffs.size(), 0.0f);
     }
-
-    auto initCoeffs = std::make_shared<std::vector<float>>(tapSize, 0.0f);
-    std::atomic_store(&firCoeffsAtomic, initCoeffs);
 }
 
 void FIRFilterAudioProcessor::releaseResources()
@@ -142,9 +144,6 @@ void FIRFilterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 {
     if (filterNeedsUpdate) {
         updateFilter();
-        for (auto& buf : delayBuffers) {
-            buf.assign(firCoeffs.size(), 0.0f);
-        }
         filterNeedsUpdate = false;
     }
 
@@ -156,7 +155,6 @@ void FIRFilterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, numSamples);
-
 
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
@@ -173,12 +171,13 @@ void FIRFilterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             // culc FIR
             // FIR: y[n] = \sum b[k] * x[n-k]
             float y = 0.0f;
-            auto coeffs = std::atomic_load(&firCoeffsAtomic);
-            for (int i = 0; i < coeffs->size(); ++i) {
-                y += (*coeffs)[i] * delayBuffer.at(i);
+            for (int i = 0; i < firCoeffs.size(); ++i) {
+                y += firCoeffs.at(i) * delayBuffer.at(i);
             }
 
-            channelData[n] = y;
+            // Soft clipping
+            float limit = 0.95f;
+            channelData[n] = juce::jlimit(-limit, limit, y);
         }
     }
 }
@@ -220,45 +219,76 @@ void FIRFilterAudioProcessor::updateFilter()
     float cutoffHz = apvts.getRawParameterValue("cutoff")->load();
     double fs = getSampleRate();
 
-    // LowpassFIR
-    auto newCoeffs = std::make_shared<std::vector<float>>(tapSize);
+    // cutoff normalization
+    float normalized_cutoff = juce::jlimit(0.001f, 0.499f, cutoffHz / (float)fs);
 
     const int M = (tapSize - 1) / 2;
 
+    // LowpassFIR
     // Hamming Window
     auto w_hamming = [=](int n) {
         return 0.54 + 0.46 * std::cos((2.0f * juce::MathConstants<float>::pi * n) / (tapSize - 1));
     };
 
-    // calc FIR coefficients
-    for (int i = -M; i <= M; ++i) {
+    int filtertype = apvts.getRawParameterValue("type")->load();
 
-        float normalized_cutoff = juce::jlimit(0.001f, 0.499f, cutoffHz / (float)fs);
-        // ideal filter's impulse response
-        float sinc = (i != 0)
-            ? (normalized_cutoff / juce::MathConstants<float>::pi) * (std::sin(normalized_cutoff * i) / (normalized_cutoff * i))
-            : (normalized_cutoff / juce::MathConstants<float>::pi);
+    if (filtertype == 0) {
+        // calc FIR coefficients
+        for (int i = -M; i <= M; ++i) {
 
-        // shifting
-        (*newCoeffs)[M + i] = sinc * w_hamming(i);
+            // ideal filter's impulse response
+            float sinc = (i != 0)
+                ? (normalized_cutoff / juce::MathConstants<float>::pi) * (std::sin(normalized_cutoff * i) / (normalized_cutoff * i))
+                : (normalized_cutoff / juce::MathConstants<float>::pi);
+
+            // shifting
+            firCoeffs.at(M + i) = sinc * w_hamming(i);
+        }
+
+        // normalize dB
+        float sum = std::accumulate(firCoeffs.begin(), firCoeffs.end(), 0.0f);
+
+        if (sum > 1e-6f) {
+            for (auto& c : firCoeffs)
+                c /= sum;
+        }
+
+    }
+    else {
+        // Highpass
+        for (int i = -M; i <= M; ++i) {
+
+            float sinc = (i != 0)
+                ? -(normalized_cutoff / juce::MathConstants<float>::pi) * (std::sin(normalized_cutoff * i) / (normalized_cutoff * i))
+                : 1.0f - (normalized_cutoff / juce::MathConstants<float>::pi);
+
+            firCoeffs.at(M + i) = sinc * w_hamming(i);
+        }
+
+        // normalize dB
+        float energy = std::sqrt(std::inner_product(
+            firCoeffs.begin(), firCoeffs.end(), firCoeffs.begin(), 0.0f));
+
+        if (energy > 1e-6f) {
+            for (auto& c : firCoeffs)
+                c /= energy;
+        }
     }
 
-    float sum = std::accumulate(newCoeffs->begin(), newCoeffs->end(), 0.0f);
-    for (auto& c : *newCoeffs) c /= sum;
+    for (auto& buf : delayBuffers) {
+        buf.assign(firCoeffs.size(), 0.0f);
+    }
 
-    std::atomic_store(&firCoeffsAtomic, newCoeffs);
+    //DBG("sum = " << sum);
+    //DBG("firCoeffs:");
+    //for (auto c : firCoeffs) DBG(c);
 }
 
 void FIRFilterAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)
 {
-    if (parameterID == "cutoff") {
-        triggerAsyncUpdate();
+    if (parameterID == "cutoff" || parameterID == "type") {
+        filterNeedsUpdate = true;
     }
-}
-
-void FIRFilterAudioProcessor::handleAsyncUpdate()
-{
-    filterNeedsUpdate = true;
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout FIRFilterAudioProcessor::createParameterLayout()
@@ -268,8 +298,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout FIRFilterAudioProcessor::cre
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         "cutoff",
         "Freq",
-        juce::NormalisableRange<float>{ 100.0f, 10000.0f, 1.0f, 0.5f },
+        juce::NormalisableRange<float>{ 50.0f, 20000.0f, 1.0f, 0.5f },
         1000.0f
+    ));
+
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        "type",
+        "Type",
+        juce::StringArray{ "LowPass", "HighPass" },
+        0
     ));
 
     return layout;
