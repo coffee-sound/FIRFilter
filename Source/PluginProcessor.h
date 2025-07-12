@@ -67,6 +67,7 @@ private:
     const int tapSize = 65;
     std::vector<float> firCoeffs;
     std::vector<std::vector<float>> delayBuffers;  // delay sample buffer
+    std::vector<int> writeIndices;
 
     void updateFilter();
 

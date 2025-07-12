@@ -106,6 +106,8 @@ void FIRFilterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     for (auto& buf : delayBuffers) {
         buf.resize(firCoeffs.size(), 0.0f);
     }
+
+    writeIndices.resize(getTotalNumInputChannels(), 0);
 }
 
 void FIRFilterAudioProcessor::releaseResources()
@@ -160,24 +162,30 @@ void FIRFilterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     {
         auto* channelData = buffer.getWritePointer (channel);
         auto& delayBuffer = delayBuffers[channel];
+        const int filterLength = static_cast<int>(firCoeffs.size());
+
+        int& writeIndex = writeIndices[channel];
 
         for (int n = 0; n < numSamples; ++n) {
-            // shift input to delaybuffer
-            for (int i = delayBuffer.size() - 1; i > 0; --i) {
-                delayBuffer.at(i) = delayBuffer.at(i - 1);
-            }
-            delayBuffer.at(0) = channelData[n];
+
+            delayBuffer[writeIndex] = channelData[n];
 
             // culc FIR
             // FIR: y[n] = \sum b[k] * x[n-k]
             float y = 0.0f;
-            for (int i = 0; i < firCoeffs.size(); ++i) {
-                y += firCoeffs.at(i) * delayBuffer.at(i);
+            int idx = writeIndex;
+
+            for (int i = 0; i < filterLength; ++i) {
+                y += firCoeffs[i] * delayBuffer[idx];
+                idx = (idx - 1 + filterLength) % filterLength;
             }
+
+            writeIndex = (writeIndex + 1) % filterLength;
 
             // Soft clipping
             float limit = 0.95f;
-            channelData[n] = juce::jlimit(-limit, limit, y);
+            //channelData[n] = juce::jlimit(-limit, limit, y);
+            channelData[n] = std::tanh(y);
         }
     }
 }
@@ -224,7 +232,6 @@ void FIRFilterAudioProcessor::updateFilter()
 
     const int M = (tapSize - 1) / 2;
 
-    // LowpassFIR
     // Hamming Window
     auto w_hamming = [=](int n) {
         return 0.54 + 0.46 * std::cos((2.0f * juce::MathConstants<float>::pi * n) / (tapSize - 1));
@@ -232,6 +239,7 @@ void FIRFilterAudioProcessor::updateFilter()
 
     int filtertype = apvts.getRawParameterValue("type")->load();
 
+    // LowpassFIR
     if (filtertype == 0) {
         // calc FIR coefficients
         for (int i = -M; i <= M; ++i) {
@@ -242,7 +250,7 @@ void FIRFilterAudioProcessor::updateFilter()
                 : (normalized_cutoff / juce::MathConstants<float>::pi);
 
             // shifting
-            firCoeffs.at(M + i) = sinc * w_hamming(i);
+            firCoeffs[M + i] = sinc * w_hamming(i);
         }
 
         // normalize dB
@@ -254,15 +262,15 @@ void FIRFilterAudioProcessor::updateFilter()
         }
 
     }
+    // HighpassFIR
     else {
-        // Highpass
         for (int i = -M; i <= M; ++i) {
 
             float sinc = (i != 0)
                 ? -(normalized_cutoff / juce::MathConstants<float>::pi) * (std::sin(normalized_cutoff * i) / (normalized_cutoff * i))
                 : 1.0f - (normalized_cutoff / juce::MathConstants<float>::pi);
 
-            firCoeffs.at(M + i) = sinc * w_hamming(i);
+            firCoeffs[M + i] = sinc * w_hamming(i);
         }
 
         // normalize dB
@@ -275,13 +283,19 @@ void FIRFilterAudioProcessor::updateFilter()
         }
     }
 
-    for (auto& buf : delayBuffers) {
-        buf.assign(firCoeffs.size(), 0.0f);
-    }
+    // this code happens popnoise or click.
+    //for (auto& buf : delayBuffers) {
+    //    buf.assign(firCoeffs.size(), 0.0f);
+    //}
 
     //DBG("sum = " << sum);
     //DBG("firCoeffs:");
     //for (auto c : firCoeffs) DBG(c);
+
+    DBG("Filter type: " << filtertype);
+    for (int i = 0; i < firCoeffs.size(); ++i) {
+        DBG("h[" << i << "] = " << firCoeffs[i]);
+    }
 }
 
 void FIRFilterAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)
